@@ -204,48 +204,80 @@ public class Zip {
                 unzCloseCurrentFile(zip)
                 ret = unzGoToNextFile(zip)
             }
-
-            var writeBytes: UInt64 = 0
-            var filePointer: UnsafeMutablePointer<FILE>?
-            filePointer = fopen(fullPath, "wb")
-            while filePointer != nil {
-                let readBytes = unzReadCurrentFile(zip, &buffer, bufferSize)
-                if readBytes > 0 {
-                    guard fwrite(buffer, Int(readBytes), 1, filePointer) == 1 else {
-                        throw ZipError.unzipFail
+          
+            let fileMode = (fileInfo.external_fa >> 16) & 0xFFFF
+            let S_IFLNK = Int32(0xA000)
+            let isSymlink = (Int32(fileMode) & Int32(0xF000)) == S_IFLNK
+            if isSymlink {
+                var linkTargetData = Data()
+                while true {
+                    let readBytes = unzReadCurrentFile(zip, &buffer, bufferSize)
+                    if readBytes > 0 {
+                        linkTargetData.append(buffer, count: Int(readBytes))
+                    } else {
+                        break
                     }
-                    writeBytes += UInt64(readBytes)
                 }
-                else {
-                    break
+              
+                if let linkTarget = String(data: linkTargetData, encoding: .utf8) {
+                    let parentDirectory = (fullPath as NSString).deletingLastPathComponent
+                    try fileManager.createDirectory(atPath: parentDirectory,
+                                                    withIntermediateDirectories: true,
+                                                    attributes: directoryAttributes)
+                    if fileManager.fileExists(atPath: fullPath) {
+                        try fileManager.removeItem(atPath: fullPath)
+                    }
+                    try fileManager.createSymbolicLink(atPath: fullPath,
+                                                       withDestinationPath: linkTarget)
                 }
-            }
-
-            if let fp = filePointer { fclose(fp) }
-
-            crc_ret = unzCloseCurrentFile(zip)
-            if crc_ret == UNZ_CRCERROR {
-                throw ZipError.unzipFail
-            }
-            guard writeBytes == fileInfo.uncompressed_size else {
-                throw ZipError.unzipFail
-            }
-
-            if let overwritePermissions = permissions {
-                do {
-                    try fileManager.setAttributes([.posixPermissions : overwritePermissions], ofItemAtPath: fullPath)
-                } catch {
-                    print("Failed to set permissions to file \(fullPath), error: \(error)")
+              
+                crc_ret = unzCloseCurrentFile(zip)
+                if crc_ret == UNZ_CRCERROR {
+                    throw ZipError.unzipFail
                 }
-            } else if fileInfo.external_fa != 0 {
-                //Set file permissions from current fileInfo
-                let permissions = (fileInfo.external_fa >> 16) & 0x1FF
-                //We will devifne a valid permission range between Owner read only to full access
-                if permissions >= 0o400 && permissions <= 0o777 {
+            } else {
+                var writeBytes: UInt64 = 0
+                var filePointer: UnsafeMutablePointer<FILE>?
+                filePointer = fopen(fullPath, "wb")
+                while filePointer != nil {
+                    let readBytes = unzReadCurrentFile(zip, &buffer, bufferSize)
+                    if readBytes > 0 {
+                        guard fwrite(buffer, Int(readBytes), 1, filePointer) == 1 else {
+                            throw ZipError.unzipFail
+                        }
+                        writeBytes += UInt64(readBytes)
+                    }
+                    else {
+                        break
+                    }
+                }
+
+                if let fp = filePointer { fclose(fp) }
+
+                crc_ret = unzCloseCurrentFile(zip)
+                if crc_ret == UNZ_CRCERROR {
+                    throw ZipError.unzipFail
+                }
+                guard writeBytes == fileInfo.uncompressed_size else {
+                    throw ZipError.unzipFail
+                }
+
+                if let overwritePermissions = permissions {
                     do {
-                        try fileManager.setAttributes([.posixPermissions : permissions], ofItemAtPath: fullPath)
+                        try fileManager.setAttributes([.posixPermissions : overwritePermissions], ofItemAtPath: fullPath)
                     } catch {
                         print("Failed to set permissions to file \(fullPath), error: \(error)")
+                    }
+                } else if fileInfo.external_fa != 0 {
+                    //Set file permissions from current fileInfo
+                    let permissions = (fileInfo.external_fa >> 16) & 0x1FF
+                    //We will devifne a valid permission range between Owner read only to full access
+                    if permissions >= 0o400 && permissions <= 0o777 {
+                        do {
+                            try fileManager.setAttributes([.posixPermissions : permissions], ofItemAtPath: fullPath)
+                        } catch {
+                            print("Failed to set permissions to file \(fullPath), error: \(error)")
+                        }
                     }
                 }
             }
